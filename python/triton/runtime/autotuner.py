@@ -148,18 +148,24 @@ class Autotuner(KernelInterface):
                 if hasattr(arg, "dtype"):
                     key.append(str(arg.dtype))
             key = tuple(key)
-            if key not in self.cache:
-                # prune configs
-                used_cached_result = False
-                pruned_configs = self.prune_configs(kwargs)
-                bench_start = time.time()
-                timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
-                bench_end = time.time()
-                self.bench_time = bench_end - bench_start
-                self.cache[key] = builtins.min(timings, key=timings.get)
-                self.pre_hook(args, reset_only=True)
-                self.configs_timings = timings
+            
+            # prune configs
+            used_cached_result = False
+            pruned_configs = self.prune_configs(kwargs)
+            bench_start = time.time()
+            timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
+            bench_end = time.time()
+            self.bench_time = bench_end - bench_start
+            self.cache[key] = builtins.min(timings, key=timings.get)
+            self.pre_hook(args, reset_only=True)
+            self.configs_timings = timings
             config = self.cache[key]
+
+            for conf, times in timings.items():
+                print(conf, " : ", times)
+            
+            print(config)
+
         else:
             config = self.configs[0]
         self.best_config = config

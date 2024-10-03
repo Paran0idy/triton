@@ -38,13 +38,42 @@ public:
 
 private:
   bool isPredicatedLoad(LLVM::CallOp callOp) const {
-    return callOp.getCallee().value().find(mlir::LLVM::AMD::Predicated_Load) !=
-           llvm::StringRef::npos;
+    return callOp.getCallee().value().contains(mlir::LLVM::AMD::predicatedLoad);
+  }
+
+  bool isPredicatedLoadCA(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedLoadCA);
+  }
+
+  bool isPredicatedLoadCG(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedLoadCG);
+  }
+
+  bool isPredicatedLoadCV(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedLoadCV);
   }
 
   bool isPredicatedStore(LLVM::CallOp callOp) const {
-    return callOp.getCallee().value().find(mlir::LLVM::AMD::Predicated_Store) !=
-           llvm::StringRef::npos;
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedStore);
+  }
+
+  bool isPredicatedStoreCS(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedStoreCS);
+  }
+
+  bool isPredicatedStoreCG(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedStoreCG);
+  }
+
+  bool isPredicatedStoreWT(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().contains(
+        mlir::LLVM::AMD::predicatedStoreWT);
   }
 
   bool isWrappedLLVMIntrinsic(LLVM::CallOp callOp) const {
@@ -72,7 +101,16 @@ private:
     rewriter.setInsertionPointToEnd(currentBlock);
     rewriter.create<LLVM::CondBrOp>(loc, pred, trueBlock, afterStore);
     rewriter.setInsertionPointToStart(trueBlock);
-    auto storeOp = rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+    /*
+                  | vialatile | non-tmp | gcn instr gfx94
+    LLVM::StoreOp | 0         | 0       | (cg) global store
+                  | 0         | 1       | (cs) global store nt
+                  | 1         | 0/1     | (wt) global store sc0 sc1
+    */
+    bool vialatileFlag = isPredicatedStoreWT(callOp);
+    bool nonTmpFlag = isPredicatedStoreCS(callOp);
+    auto storeOp = rewriter.create<LLVM::StoreOp>(
+        loc, val, ptr, /*alignment=*/0, vialatileFlag, nonTmpFlag);
     rewriter.create<LLVM::BrOp>(loc, afterStore);
     rewriter.setInsertionPointToStart(afterStore);
     rewriter.eraseOp(callOp);
@@ -100,7 +138,16 @@ private:
     rewriter.setInsertionPointToEnd(currentBlock);
     rewriter.create<LLVM::CondBrOp>(loc, pred, trueBlock, falseBlock);
     rewriter.setInsertionPointToStart(trueBlock);
-    auto loadOp = rewriter.create<LLVM::LoadOp>(loc, elemTy, ptr);
+    /*
+                 | vialatile | non-tmp | gcn instr gfx94
+    LLVM::LoadOp | 0         | 0       | (ca) global load
+                 | 0/1       | 1       | (cg) global load nt
+                 | 1         | 0       | (cv) flat load sc0 sc1
+    */
+    bool vialatileFlag = isPredicatedLoadCV(callOp);
+    bool nonTmpFlag = isPredicatedLoadCG(callOp);
+    auto loadOp = rewriter.create<LLVM::LoadOp>(
+        loc, elemTy, ptr, /*alignment=*/0, vialatileFlag, nonTmpFlag);
     rewriter.create<LLVM::BrOp>(loc, loadOp->getResult(0), afterLoad);
     rewriter.setInsertionPointToStart(falseBlock);
     rewriter.create<LLVM::BrOp>(loc, falseVal, afterLoad);
@@ -117,7 +164,7 @@ private:
     auto operands = callOp.getOperands();
     auto result = callOp.getResult();
 
-    LLVM::LLVMFunctionType calleeType = callOp.getCalleeType().value();
+    LLVM::LLVMFunctionType calleeType = callOp.getCalleeFunctionType();
     Type returnType = calleeType.getReturnType();
 
     auto loc = callOp.getLoc();
@@ -165,10 +212,14 @@ struct ConvertBuiltinFuncToLLVM
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
 
+    GreedyRewriteConfig config;
+    config.enableRegionSimplification = GreedySimplifyRegionLevel::Aggressive;
+
     RewritePatternSet patterns(context);
     patterns.add<CallOpConversion>(context);
 
-    if (mlir::applyPatternsAndFoldGreedily(mod, std::move(patterns)).failed()) {
+    if (mlir::applyPatternsAndFoldGreedily(mod, std::move(patterns), config)
+            .failed()) {
       signalPassFailure();
     }
   }

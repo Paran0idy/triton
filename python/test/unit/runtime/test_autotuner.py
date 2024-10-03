@@ -6,28 +6,31 @@ import pytest
 
 
 @pytest.mark.parametrize('use_cuda_graph', [False, True])
-def test_kwargs(use_cuda_graph: bool):
-    N = 1024
-    src = torch.empty(N, device='cuda')
-    dst = torch.empty(N, device='cuda')
+def test_kwargs(use_cuda_graph: bool, device: str):
+    M, N = 1024, 16
+    src = torch.randn(M * N, device=device)
+    dst = torch.empty(M * N, device=device)
 
-    configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
+    configs = [triton.Config(kwargs={'BLOCK_SIZE_M': 32}), triton.Config(kwargs={'BLOCK_SIZE_M': 128})]
 
-    @triton.autotune(configs=configs, key=['N'], warmup=1, rep=1, use_cuda_graph=use_cuda_graph)
+    @triton.autotune(configs=configs, key=['M'], warmup=1, rep=1, use_cuda_graph=use_cuda_graph)
     @triton.jit
-    def _kernel(dst, src, N, BLOCK_SIZE: tl.constexpr):
-        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        x = tl.load(src + offsets, mask=offsets < N)
-        tl.store(dst + offsets, x, mask=offsets < N)
+    def _kernel(dst, src, stride_m: tl.constexpr, M, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
+        offsets_m = tl.program_id(0) * stride_m + tl.arange(0, BLOCK_SIZE_M)
+        offsets_n = tl.arange(0, BLOCK_SIZE_N)
+        x = tl.load(src + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :])
+        tl.store(dst + offsets_m[:, None] * BLOCK_SIZE_N + offsets_n[None, :], x)
 
-    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE']), )
-    _kernel[grid](dst, src, N)
-    _kernel[grid](dst=dst, src=src, N=N)
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_M']), )
+    _kernel[grid](dst, src, N, M, N)
+    # the key word args could be in arbitrary order.
+    _kernel[grid](dst=dst, src=src, M=M // 2, stride_m=N, BLOCK_SIZE_N=N)
+    assert len(_kernel.cache) == 2
 
 
-def test_restore():
+def test_restore(device):
     N = 1024
-    src = torch.zeros(N, device='cuda')
+    src = torch.zeros(N, device=device)
 
     configs = [triton.Config(kwargs={'BLOCK_SIZE': 32}), triton.Config(kwargs={'BLOCK_SIZE': 128})]
 
@@ -43,10 +46,10 @@ def test_restore():
     triton.testing.assert_close(src, torch.ones_like(src))
 
 
-def test_hooks():
+def test_hooks(device):
     # Autotuner's pre- and post- hooks should be called the same number of times
     N = 4096
-    src = torch.zeros(N, device='cuda')
+    src = torch.zeros(N, device=device)
 
     configs = [triton.Config(kwargs={'BLOCK_SIZE': 4096}), triton.Config(kwargs={'BLOCK_SIZE': 32})]
 
@@ -87,10 +90,10 @@ def test_hooks():
 
 
 @pytest.mark.parametrize('with_perf_model', [False, True])
-def test_prune_configs(with_perf_model: bool):
+def test_prune_configs(with_perf_model: bool, device: str):
     N = 1024
-    src = torch.empty(N, device='cuda')
-    dst = torch.empty(N, device='cuda')
+    src = torch.randn(N, device=device)
+    dst = torch.empty(N, device=device)
     records = {}
 
     def early_config_prune(configs, named_args, **kwargs):
